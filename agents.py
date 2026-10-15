@@ -357,16 +357,35 @@ async def run_filings_rag_agent(ticker: str, delay_ms: float = 45.0) -> AgentOut
         rag = get_rag_engine()
         result = rag.query_grounded_filings(ticker)
 
-        if result["status"] == "degraded" or not result["evidence"]:
+        # Case 1: RAG Subsystem Initialization or Search Failure
+        if result.get("status") == "failed":
             latency_ms = round((time.time() - t0) * 1000, 1)
             return AgentOutput(
                 agent="FilingsRAGAgent",
                 ticker=ticker,
-                label="No Filing Evidence",
+                label=result.get("label", "RAG Init Failed"),
+                score=0.0,
+                confidence=0.0,
+                reasoning=[
+                    result.get("summary", "RAG subsystem offline or uninitialized."),
+                    "Uncited / ungrounded claim: Recommendation proceeds safely without corporate filing evidence.",
+                ],
+                evidence=[],
+                status="failed",
+                latency_ms=latency_ms,
+            )
+
+        # Case 2: Healthy RAG Engine, but no filing evidence for ticker (e.g. ADANIENT)
+        if result.get("status") == "degraded" or not result.get("evidence"):
+            latency_ms = round((time.time() - t0) * 1000, 1)
+            return AgentOutput(
+                agent="FilingsRAGAgent",
+                ticker=ticker,
+                label=result.get("label", "No Filing Evidence"),
                 score=0.0,
                 confidence=0.20,
                 reasoning=[
-                    f"Degraded: No supporting filings or disclosures found for {ticker} above similarity threshold.",
+                    result.get("summary", f"No supporting filings or disclosures found for {ticker} in regulatory repository."),
                     "Uncited / low confidence signal: Recommendation cannot lean on regulatory validation.",
                 ],
                 evidence=[],
@@ -374,6 +393,7 @@ async def run_filings_rag_agent(ticker: str, delay_ms: float = 45.0) -> AgentOut
                 latency_ms=latency_ms,
             )
 
+        # Case 3: Grounded retrieval with evidence
         citations = result["citations"]
         evidence = result["evidence"]
         score = result["sentiment_bias"]
@@ -428,6 +448,7 @@ async def run_filings_rag_agent(ticker: str, delay_ms: float = 45.0) -> AgentOut
             status="failed",
             latency_ms=latency_ms,
         )
+
 
 
 # 5. RiskAgent (User-Aware)
@@ -531,32 +552,41 @@ async def run_risk_agent(
 # --- Orchestrators: Parallel vs Sequential Execution ---
 
 async def _safe_execute(coro, agent_name: str, ticker: str, timeout_sec: float = 2.0) -> AgentOutput:
+    t0 = time.time()
     try:
         return await asyncio.wait_for(coro, timeout=timeout_sec)
     except asyncio.TimeoutError:
+        latency_ms = round((time.time() - t0) * 1000, 1)
         return AgentOutput(
             agent=agent_name,
             ticker=ticker,
             label="Timeout",
             score=0.0,
             confidence=0.0,
-            reasoning=[f"{agent_name} timed out after {timeout_sec}s"],
+            reasoning=[f"{agent_name} timed out after {timeout_sec:.2f}s execution limit."],
             evidence=[],
             status="failed",
-            latency_ms=round(timeout_sec * 1000, 1),
+            latency_ms=latency_ms,
         )
     except Exception as e:
+        latency_ms = round((time.time() - t0) * 1000, 1)
         return AgentOutput(
             agent=agent_name,
             ticker=ticker,
-            label="Failed",
+            label="Execution Exception",
             score=0.0,
             confidence=0.0,
-            reasoning=[f"Execution exception: {str(e)}"],
+            reasoning=[f"Execution exception in {agent_name}: {str(e)}"],
             evidence=[],
             status="failed",
-            latency_ms=0.0,
+            latency_ms=latency_ms,
         )
+
+
+async def _failing_coroutine(exc: Exception):
+    """Utility coroutine that raises an injected exception for deterministic fault tests."""
+    await asyncio.sleep(0.005)
+    raise exc
 
 
 async def run_agents_parallel(
@@ -565,27 +595,69 @@ async def run_agents_parallel(
     simulate_stale: bool = False,
     simulate_agent_timeout: bool = False,
     agent_timeout: float = 2.0,
+    agent_timeouts: Optional[Dict[str, float]] = None,
+    inject_exceptions: Optional[Dict[str, Exception]] = None,
 ) -> Tuple[List[AgentOutput], float]:
     """
-    Executes all 5 agents concurrently using asyncio.gather.
+    Executes all 5 agents concurrently using asyncio.gather with fault isolation.
+    Configurable per-agent timeouts and fault injection ensure one failed agent
+    never cancels or corrupts surviving agents.
     Returns (outputs, total_parallel_latency_ms).
     """
     t_start = time.time()
+    timeouts = agent_timeouts or {}
+    injections = inject_exceptions or {}
     
     # If simulate_agent_timeout is toggled for failure lab:
     mom_delay = 3500.0 if simulate_agent_timeout else 40.0
 
+    agent_names = ["MomentumAgent", "VolumeAgent", "SentimentAgent", "FilingsRAGAgent", "RiskAgent"]
+
+    def get_coro(name: str):
+        if name in injections:
+            return _failing_coroutine(injections[name])
+        if name == "MomentumAgent":
+            return run_momentum_agent(ticker, simulate_stale=simulate_stale, delay_ms=mom_delay)
+        elif name == "VolumeAgent":
+            return run_volume_agent(ticker, simulate_stale=simulate_stale)
+        elif name == "SentimentAgent":
+            return run_sentiment_agent(ticker)
+        elif name == "FilingsRAGAgent":
+            return run_filings_rag_agent(ticker)
+        elif name == "RiskAgent":
+            return run_risk_agent(ticker, user)
+        raise ValueError(f"Unknown agent: {name}")
+
     tasks = [
-        _safe_execute(run_momentum_agent(ticker, simulate_stale=simulate_stale, delay_ms=mom_delay), "MomentumAgent", ticker, agent_timeout),
-        _safe_execute(run_volume_agent(ticker, simulate_stale=simulate_stale), "VolumeAgent", ticker, agent_timeout),
-        _safe_execute(run_sentiment_agent(ticker), "SentimentAgent", ticker, agent_timeout),
-        _safe_execute(run_filings_rag_agent(ticker), "FilingsRAGAgent", ticker, agent_timeout),
-        _safe_execute(run_risk_agent(ticker, user), "RiskAgent", ticker, agent_timeout),
+        _safe_execute(get_coro(name), name, ticker, timeouts.get(name, agent_timeout))
+        for name in agent_names
     ]
 
-    results = await asyncio.gather(*tasks)
+    # return_exceptions=True guarantees that an unhandled exception in one coroutine cannot cancel others
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    final_outputs: List[AgentOutput] = []
+    for idx, res in enumerate(results):
+        if isinstance(res, Exception):
+            agent_name = agent_names[idx]
+            final_outputs.append(
+                AgentOutput(
+                    agent=agent_name,
+                    ticker=ticker,
+                    label="Failed",
+                    score=0.0,
+                    confidence=0.0,
+                    reasoning=[f"Unhandled exception in task wrapper: {str(res)}"],
+                    evidence=[],
+                    status="failed",
+                    latency_ms=0.0,
+                )
+            )
+        else:
+            final_outputs.append(res)
+
     total_ms = round((time.time() - t_start) * 1000, 1)
-    return list(results), total_ms
+    return final_outputs, total_ms
 
 
 async def run_agents_sequential(
@@ -604,3 +676,4 @@ async def run_agents_sequential(
     ]
     total_ms = round((time.time() - t_start) * 1000, 1)
     return results, total_ms
+

@@ -144,9 +144,11 @@ if active_user.panic_sell_flag:
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧪 Failure Mode Lab")
-st.sidebar.caption("Toggle synthetic real-world anomalies to verify graceful degradation:")
+st.sidebar.caption("Verify graceful degradation across 4 synthetic anomaly scenarios:")
 sim_stale = st.sidebar.checkbox("1. Price Feed Stale / Down", value=False, help="Uses 5-day cached data with degraded banner & discounted confidence")
-sim_timeout = st.sidebar.checkbox("4. Agent Timeout Injection", value=False, help="Forces MomentumAgent to exceed 2.0s timeout")
+st.sidebar.caption("👉 **2. Missing Filings:** Select ticker `ADANIENT` or `BHARTIARTL`.")
+st.sidebar.caption("👉 **3. Agent Signal Conflict:** Select ticker `INFY`.")
+sim_timeout = st.sidebar.checkbox("4. Agent Timeout Injection", value=False, help="Forces MomentumAgent to exceed execution timeout")
 
 # 1-Click Scripted Demo Scenario
 st.sidebar.markdown("---")
@@ -185,7 +187,7 @@ with tab1:
             "Vol Z-Score": st.column_config.NumberColumn("Vol Z-Score", format="%.2f"),
         },
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
     st.markdown("---")
@@ -327,7 +329,7 @@ with tab1:
 
             with st.expander("Pairwise Agent Alignment Matrix"):
                 matrix_df = pd.DataFrame(rec.agent_agreement_matrix).round(2)
-                st.dataframe(matrix_df, use_container_width=True)
+                st.dataframe(matrix_df, width="stretch")
 
         with col_cites:
             st.markdown("#### 📑 Grounded Citations & Evidence Ledger")
@@ -378,7 +380,7 @@ with tab2:
                     "PnL (%)": round(pnl, 2),
                     "Weight (%)": round(wt, 1),
                 })
-            st.dataframe(pd.DataFrame(h_data), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(h_data), hide_index=True, width="stretch")
         else:
             st.info("No active equity holdings.")
 
@@ -448,18 +450,47 @@ with tab3:
     backtest = get_backtest_results()
     session = get_session_performance_metrics()
 
-    # Metrics Row
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("30-Day Forward Hit Rate", f"{backtest['overall_hit_rate']}%", help="Walk-forward backtest over simulated 2-year history with no lookahead")
-    m2.metric("Parallel Speedup", f"{session['parallel_speedup']}x", f"{session['avg_parallel_latency_ms']}ms par vs {session['avg_sequential_latency_ms']}ms seq")
-    m3.metric("Citation Coverage", f"{session['avg_citation_coverage_pct']}%", help="Percentage of synthesized claims grounded in citations")
-    m4.metric("Guardrail Intercepts", f"{session['guardrail_triggers']}", f"{session['disagreements_resolved']} conflicts arbitrated")
+    # Section 1: Session Performance
+    st.markdown("#### ⏱️ Real-Time Session Execution Benchmarks")
+    if session["has_session_data"]:
+        st.caption(f"Measured from **{session['total_analyses']} live session analyses** ({session['successful_analyses']} healthy, {session['degraded_analyses']} degraded, {session['failed_analyses']} failed):")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Parallel Execution", f"{session['avg_parallel_latency_ms']} ms", f"Speedup: {session['parallel_speedup']}x vs sequential")
+        m2.metric("Sequential Baseline", f"{session['avg_sequential_latency_ms']} ms")
+        m3.metric("Citation Coverage", f"{session['avg_citation_coverage_pct']}%", help="Percentage of synthesized claims grounded in citations")
+        m4.metric("Guardrails & Conflicts", f"{session['guardrail_triggers']} Intercepts", f"{session['disagreements_resolved']} conflicts arbitrated")
+    else:
+        st.info("ℹ️ **No live session measurements recorded yet.** Run an analysis in Tab 1 or click 'Run Demo Scenario' to capture real-time measurements in SQLite.")
+        with st.expander("📊 View Precomputed Offline Calibration Baseline (N = 14 benchmark runs)", expanded=True):
+            b = session["demo_baseline"]
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("Parallel Speedup", f"{b['parallel_speedup']}x", f"{b['avg_parallel_latency_ms']}ms par vs {b['avg_sequential_latency_ms']}ms seq")
+            b2.metric("Citation Coverage", f"{b['avg_citation_coverage_pct']}%")
+            b3.metric("Avg HHI Shift", f"{b['avg_hhi_change']:.0f}")
+            b4.metric("Precomputed Runs", f"{b['samples']} analyses")
+            st.caption("⚠️ *Note: These figures reflect offline calibration on simulated scenarios, not live session measurements.*")
 
     st.markdown("---")
+    st.markdown("#### 📈 Walk-Forward Backtest (Zero Lookahead on 2-Year Synthetic History)")
+    st.caption(
+        f"**Dataset:** {backtest['evaluation_dataset']} | "
+        f"**Valid Observations:** {backtest['valid_observations']} ({backtest['correct_predictions']} correct, {backtest['incorrect_predictions']} incorrect, {backtest['excluded_samples']} neutral excluded)"
+    )
+
+    bt_c1, bt_c2, bt_c3, bt_c4 = st.columns(4)
+    bt_c1.metric(
+        "30-Day Forward Hit Rate",
+        f"{backtest['overall_hit_rate']}%",
+        f"{backtest['outperformance_vs_baseline_pct']:+0.1f}% vs Majority Baseline",
+    )
+    bt_c2.metric("Majority Direction Baseline", f"{backtest['majority_baseline_hit_rate_pct']}%", help="Hit rate from naive majority-class directional prediction")
+    bt_c3.metric("Directional Edge", f"{backtest['outperformance_vs_baseline_pct']:+0.1f}%", help="Ensemble hit rate minus naive majority baseline")
+    bt_c4.metric("Sample Checkpoints", f"{backtest['valid_observations']} observations", f"{backtest['total_evaluated_checkpoints']} tested")
+
     col_bt1, col_bt2 = st.columns([1, 1])
 
     with col_bt1:
-        st.markdown("#### Walk-Forward Agent Directional Accuracy")
+        st.markdown("##### Agent-by-Agent Directional Accuracy")
         st.caption("Hit rate vs 30-day forward return across historical checkpoints:")
         acc_data = []
         for ag, d in backtest["agent_accuracy"].items():
@@ -469,20 +500,22 @@ with tab3:
                 "Directional Hits": d["correct_calls"],
                 "Hit Rate (%)": d["hit_rate_pct"],
             })
-        st.dataframe(pd.DataFrame(acc_data), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(acc_data), hide_index=True, width="stretch")
 
     with col_bt2:
-        st.markdown("#### Ticker Hit Rate Breakdown")
+        st.markdown("##### Ticker Hit Rate Breakdown")
         st.dataframe(
             pd.DataFrame(backtest["ticker_breakdown"]),
             column_config={
                 "hit_rate_pct": st.column_config.ProgressColumn("Hit Rate", min_value=0, max_value=100, format="%.1f%%")
             },
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
+    st.caption("⚖️ *Methodology Disclosure: Backtest uses rolling indicators strictly recomputed on historical slices with non-overlapping forward return targets. Evaluated on simulated data for research prototyping.*")
     st.markdown("---")
+
     st.markdown("#### 🧪 Failure Mode Resilience Verification")
     st.markdown("""
     | Failure Scenario | Built-in Mechanism | Status |
@@ -493,11 +526,3 @@ with tab3:
     | **4. Agent Timeout / Exception** | Caught via `asyncio.wait_for` timeout wrappers; pipeline finishes with remaining agents. | ✅ Handled (1.5s per-agent timeout) |
     """)
 
-# UI Footer Disclosures
-st.markdown("""
-<div class="disclaimer-footer">
-    <b>DISCLOSURE & EDUCATIONAL DISCLAIMER:</b><br/>
-    VibeFinance is a hackathon research prototype. All market data, OHLCV candles, and corporate filings are synthetically generated and simulated for demonstration purposes.
-    This platform does NOT provide SEBI-registered investment advice or research analyst recommendations. Indian retail investors should consult a SEBI-registered investment advisor before making financial decisions.
-</div>
-""", unsafe_allow_html=True)

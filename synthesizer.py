@@ -73,14 +73,16 @@ class Recommendation(BaseModel):
 def compute_agreement_matrix(agents: List[AgentOutput]) -> Dict[str, Dict[str, float]]:
     """
     Computes pairwise agreement score between all agents based on directional sign alignment.
-    Agreement = 1.0 (same direction), 0.5 (one neutral), 0.0 (opposite signs).
+    Agreement = 1.0 (same direction), 0.5 (one neutral), 0.0 (opposite signs or failed agent).
     """
     matrix: Dict[str, Dict[str, float]] = {}
     for a1 in agents:
         matrix[a1.agent] = {}
         for a2 in agents:
             if a1.agent == a2.agent:
-                matrix[a1.agent][a2.agent] = 1.0
+                matrix[a1.agent][a2.agent] = 1.0 if a1.status != "failed" else 0.0
+            elif a1.status == "failed" or a2.status == "failed":
+                matrix[a1.agent][a2.agent] = 0.0
             else:
                 s1 = a1.score
                 s2 = a2.score
@@ -99,12 +101,14 @@ def detect_conflicts(
 ) -> Tuple[List[ConflictDetail], float]:
     """
     Identifies high-confidence opposing signals (confidence > 0.60 and opposite directional signs).
+    Excludes failed or uninitialized agents.
     Returns (conflicts, confidence_penalty_discount).
     """
     conflicts: List[ConflictDetail] = []
     penalty_factor = 1.0
 
-    agent_dict = {a.agent: a for a in agents}
+    valid_agents = [a for a in agents if a.status != "failed"]
+    agent_dict = {a.agent: a for a in valid_agents}
     agent_names = list(agent_dict.keys())
 
     for i in range(len(agent_names)):
@@ -125,7 +129,6 @@ def detect_conflicts(
 
                 winner = a.agent if effective_a >= effective_b else b.agent
                 loser = b.agent if effective_a >= effective_b else a.agent
-                win_score = a.score if winner == a.agent else b.score
 
                 resolution = (
                     f"Conflict detected: {a.agent} ({a.label}, score {a.score:+.2f}, conf {a.confidence:.0%}) "
@@ -157,6 +160,7 @@ def synthesize_recommendation(
     """
     Synthesize all agent outputs, user risk profile, guardrails, and behavioral nudges
     into an explainable, cited recommendation.
+    Handles partial and total agent failures safely.
     """
     store = get_market_store()
     meta = store.get_metadata(ticker)
@@ -167,6 +171,9 @@ def synthesize_recommendation(
     weights_table = PROFILE_WEIGHT_TABLES.get(
         user.profile_type, PROFILE_WEIGHT_TABLES["Balanced Wealth Builder"]
     )
+
+    failed_agents = [a for a in agents if a.status == "failed"]
+    active_agents = [a for a in agents if a.status != "failed"]
 
     # 2. Weighted Score and Base Confidence
     weighted_score_num = 0.0
@@ -180,13 +187,31 @@ def synthesize_recommendation(
 
     reasoning_chain.append(f"1. Context: User '{user.name}' ({user.profile_type}), evaluating ₹ investment in {ticker} ({meta.get('name', ticker)}) - Sector: {sector}.")
 
+    if len(failed_agents) == len(agents):
+        reasoning_chain.append("⚠️ CRITICAL ALERT: All 5 specialist agents failed or timed out. Defaulting to defensive HOLD with 0% allocation.")
+    elif failed_agents:
+        reasoning_chain.append(
+            f"⚠️ Partial Execution Alert: {len(failed_agents)} agent(s) ({', '.join(a.agent for a in failed_agents)}) failed. "
+            f"Recommendation synthesized strictly from {len(active_agents)} surviving agent(s)."
+        )
+
     for a in agents:
         w = weights_table.get(a.agent, 0.20)
+        base_confidence_denom += w
+
+        if a.status == "failed":
+            # Failed agents have ZERO score weight and ZERO confidence contribution
+            status_tag = f"[{a.status.upper()}]"
+            reason_snip = a.reasoning[0] if a.reasoning else "Agent unavailable"
+            reasoning_chain.append(
+                f"2. Agent Signal: {a.agent} → {a.label} (Score: {a.score:+.2f}, Confidence: {a.confidence:.0%}) {status_tag}. Reason: {reason_snip}"
+            )
+            continue
+
         eff_w = w * a.confidence
         weighted_score_num += a.score * eff_w
         weighted_score_denom += eff_w
         base_confidence_num += a.confidence * w
-        base_confidence_denom += w
 
         # Collect evidence & citations
         for ev in a.evidence:
@@ -202,8 +227,15 @@ def synthesize_recommendation(
             f"2. Agent Signal: {a.agent} → {a.label} (Score: {a.score:+.2f}, Confidence: {a.confidence:.0%}) {status_tag}. Weight: {w:.0%}"
         )
 
-    composite_score = round(weighted_score_num / (weighted_score_denom + 1e-6), 2)
-    composite_confidence = round(base_confidence_num / (base_confidence_denom + 1e-6), 2)
+    if weighted_score_denom > 0:
+        composite_score = round(weighted_score_num / weighted_score_denom, 2)
+    else:
+        composite_score = 0.0
+
+    if base_confidence_denom > 0:
+        composite_confidence = round(base_confidence_num / base_confidence_denom, 2)
+    else:
+        composite_confidence = 0.0
 
     # 3. Conflict Detection
     conflicts, penalty = detect_conflicts(agents, weights_table, user.profile_type)
@@ -242,7 +274,12 @@ def synthesize_recommendation(
     action = "Hold"
     final_pos_size = suggested_allocation_pct * 100.0  # as %
 
-    if guardrail_msg:
+    if len(failed_agents) == len(agents):
+        # All agents failed: Force safe Hold with 0 allocation
+        action = "Hold"
+        final_pos_size = 0.0
+        reasoning_chain.append("4. Safety Fallback: Allocation zeroed due to complete agent subsystem unavailability.")
+    elif guardrail_msg:
         action = "Avoid"
         final_pos_size = 0.0
         reasoning_chain.append(f"4. Guardrail Rule Fired: {guardrail_msg}")
@@ -265,6 +302,7 @@ def synthesize_recommendation(
         else:
             action = "Hold"
             final_pos_size = 0.0
+
 
     # 7. Behavioral Nudge Formulation
     nudge_msg = None
