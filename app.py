@@ -118,7 +118,31 @@ init_db()
 store = get_market_store()
 
 # --- SIDEBAR CONFIGURATION & FAILURE LAB ---
-st.sidebar.image("https://img.icons8.com/isometric/100/graph.png", width=56)
+st.sidebar.markdown("""
+<div style="margin-bottom: 4px;">
+  <svg width="56" height="56" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="56" height="56" rx="12" fill="url(#grad)"/>
+    <defs>
+      <linearGradient id="grad" x1="0" y1="0" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stop-color="#f97316"/>
+        <stop offset="100%" stop-color="#ea580c"/>
+      </linearGradient>
+    </defs>
+    <!-- Candlestick chart -->
+    <rect x="11" y="30" width="6" height="14" rx="1.5" fill="white" fill-opacity="0.9"/>
+    <rect x="13.5" y="24" width="1" height="6" fill="white" fill-opacity="0.7"/>
+    <rect x="13.5" y="44" width="1" height="3" fill="white" fill-opacity="0.7"/>
+    <rect x="24" y="18" width="6" height="18" rx="1.5" fill="white" fill-opacity="0.9"/>
+    <rect x="26.5" y="13" width="1" height="5" fill="white" fill-opacity="0.7"/>
+    <rect x="26.5" y="36" width="1" height="4" fill="white" fill-opacity="0.7"/>
+    <rect x="37" y="24" width="6" height="12" rx="1.5" fill="white" fill-opacity="0.9"/>
+    <rect x="39.5" y="18" width="1" height="6" fill="white" fill-opacity="0.7"/>
+    <rect x="39.5" y="36" width="1" height="3" fill="white" fill-opacity="0.7"/>
+    <!-- Trend line -->
+    <polyline points="14,37 27,27 40,30" stroke="white" stroke-width="1.5" stroke-opacity="0.5" stroke-dasharray="2,2" fill="none"/>
+  </svg>
+</div>
+""", unsafe_allow_html=True)
 st.sidebar.title("⚡ VibeFinance")
 st.sidebar.caption("Explainable Multi-Agent Intelligence for NSE Investors")
 
